@@ -19,9 +19,10 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 
 本 Skill 专为 ESP 系列芯片生成清晰、可维护的 FreeRTOS 多任务架构框架。核心特点：
 - **UI 框架适配**：不改变原有 UI 框架，通过外部接口调用
+- **app_arch 封装层**：提供线程安全的 UI 局部更新接口，外部任务无需直接操作 UI 消息队列
 - **任务最小化**：合并同类功能，减少任务数量
 - **传感器集成**：按需集成用户指定的传感器和第三方库
-- **清晰分层**：任务层、中间层、驱动层、组件层分离
+- **清晰分层**：任务层、app_arch 层、中间层、驱动层、组件层分离
 - **低耦合设计**：通过消息队列解耦，避免直接跨层调用
 - **完整文档**：自动生成 CMake 配置和中文使用指南
 
@@ -99,6 +100,22 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
    - ⭐ **项目中是否已有 LVGL 任务？**（如 `esp_lvgl_port`、`lvgl_port_task` 等）
      - **如果已有 LVGL 任务** → 不新建 UI 任务，直接复用现有 LVGL 任务，在其中添加消息接收逻辑
      - **如果没有 LVGL 任务** → 新建 1 个独立的 UI 任务（Task_LvglUI）
+   - ⭐⭐ **强制询问：UI 框架的接口文件在哪里？**（必须执行）
+     - **必须扫描项目代码**，找到 UI 框架的接口文件位置（如 `ui_interface.h`、`ui_api.h`、`lvgl_port.h` 等）
+     - **必须向用户确认**：UI 框架的接口文件在哪个路径？接口函数有哪些？
+     - **等待用户回复后**，将 `app_arch` 层与用户确认的 UI 框架接口绑定
+     - **绝对不改变原 UI 框架的内容**，只在 `app_arch` 层调用 UI 框架提供的外部接口
+     - **示例输出**：
+       > 我检测到你的项目中已有 UI 框架，接口文件在 `ui/ui_interface.h`，包含以下接口：
+       > - `ui_update_label(label_id, text)` → 更新标签文字
+       > - `ui_update_image(img_id, data)` → 更新图片
+       > 
+       > 请确认：
+       > 1. 这些接口是否正确？
+       > 2. 还有其他需要暴露的接口吗？
+       > 3. 接口文件路径是 `ui/ui_interface.h` 吗？
+       > 
+       > 确认后，我会将 `app_arch` 层与这些接口绑定，不修改原 UI 框架代码。
 
 2. **传感器列表**：
    - 需要集成哪些传感器？（DS1302、DHT11、BMP280、ADC 电池检测等）
@@ -132,15 +149,23 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 
 #### 2.1 UI 框架适配策略
 
+**⭐⭐ 强制要求：必须先找到 UI 框架的接口文件并与用户确认**
+- 在生成架构前，**必须扫描项目代码**，找到 UI 框架的接口文件位置
+- **必须向用户确认**接口文件路径和接口函数列表
+- **等待用户确认或补充后**，才能将 `app_arch` 层与 UI 框架接口绑定
+- **绝对不改变原 UI 框架的内容**，只在 `app_arch` 层调用 UI 框架提供的外部接口
+
 **场景 A：已有 UI 框架且提供外部接口**
 - 以 UI 框架接口为主导
-- FreeRTOS 任务通过 UI 提供的 API 更新界面
+- `app_arch` 层通过 UI 提供的 API 更新界面
 - 示例：LVGL 的 `lv_label_set_text()` 只能在 UI 任务中调用
+- **必须确认接口文件位置**：如 `ui/ui_interface.h`，包含哪些接口函数
 
 **场景 B：已有 UI 框架但无外部接口**
 - 创建 UI 适配层中间件
 - 其他任务通过消息队列发送 UI 更新请求
 - UI 任务接收消息后调用 UI 框架 API
+- **必须确认**：UI 框架的哪些函数可以被外部调用？
 
 **场景 C：无 UI 框架**
 - 创建独立的 UI 任务，集成 LVGL 或其他框架
@@ -156,6 +181,7 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
   2. 在 `esp_lvgl_port` 任务中添加消息接收逻辑
   3. 其他任务通过消息队列发送 UI 更新请求给 `esp_lvgl_port`
   4. `esp_lvgl_port` 任务接收消息后调用 `lv_label_set_text()` 等 LVGL API
+- **必须确认**：LVGL 相关的接口文件在哪里？用户是否需要暴露额外的接口？
 
 **判断是否有 LVGL 任务的方法**：
 - 搜索 `esp_lvgl_port`、`lvgl_port_task`、`lv_task_handler` 等关键字
@@ -226,7 +252,7 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 #### 2.3 解耦与合耦策略
 
 **解耦场景**：
-- 传感器采集与 UI 显示：通过消息队列解耦
+- 传感器采集与 UI 显示：通过 `app_arch` 层（`app_arch_ui_update()`）解耦，传感器任务不直接碰 UI 消息队列
 - 打印请求与打印执行：通过打印队列解耦
 - WiFi 数据与本地处理：通过事件组解耦
 
@@ -234,11 +260,147 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 - DS1302 和 Flash 都使用 SPI/GPIO：合并到同一任务，避免 IO 竞争
 - 按键扫描和 ADC 采样都是定时任务：合并到系统外设任务
 
-#### 2.4 中间件简化原则
+#### 2.4 app_arch 线程安全 UI 更新封装层
 
-- **最多一层中间件**：任务层 → 中间层（可选）→ 驱动层
+**⭐⭐ 强制要求：必须与用户确认的 UI 框架接口绑定**
+- `app_arch` 层**必须调用用户确认的 UI 框架接口**，不能自己假设接口
+- **绝对不改变原 UI 框架的内容**，只在 `app_arch` 层调用 UI 框架提供的外部接口
+- 如果用户没有提供 UI 框架接口，**必须先询问用户**，等待用户确认后再继续
+- 示例：如果用户确认 UI 框架接口在 `ui/ui_interface.h`，包含 `ui_update_label()` 等函数，则 `app_arch` 层必须调用这些函数
+
+**设计目的**：
+- 为外部任务（传感器任务、通信任务等）提供线程安全的 UI 局部更新接口
+- 外部任务无需知道 UI 消息队列和 UI 框架的存在，只需调用简单函数
+- 降低耦合度：传感器任务不直接操作 `ui_msg_queue`，而是通过 `app_arch` 层封装的接口
+- **不改变原 UI 框架内容**：`app_arch` 层只调用 UI 框架提供的外部接口，不修改 UI 框架代码
+
+**核心接口**：
+```c
+// 在 app_arch/app_arch_ui.h 中定义
+typedef enum {
+    UI_UPDATE_KEY,          // 按键事件
+    UI_UPDATE_RTC,          // RTC 时间
+    UI_UPDATE_BATTERY,      // 电池电压
+    UI_UPDATE_SENSOR,       // 传感器数据
+    UI_UPDATE_CUSTOM,       // 自定义数据
+} ui_update_type_t;
+
+typedef struct {
+    ui_update_type_t type;
+    union {
+        uint8_t key_id;
+        float voltage;
+        rtc_time_t rtc_time;
+        sensor_data_t sensor;
+        void *custom_data;  // 自定义数据指针
+    } data;
+} ui_update_msg_t;
+
+// 线程安全的 UI 更新接口（任何任务都可调用）
+esp_err_t app_arch_ui_update(ui_update_type_t type, void *data);
+
+// 示例调用（在传感器任务中）：
+void Task_SystemPeriph(void *arg)
+{
+    while(1)
+    {
+        // 读取传感器数据
+        float temp = dht11_read_temp();
+        
+        // 通过 app_arch 层更新 UI（线程安全）
+        app_arch_ui_update(UI_UPDATE_SENSOR, &temp);
+        
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+```
+
+**内部实现**：
+```c
+// 在 app_arch/app_arch_ui.c 中实现
+static QueueHandle_t ui_msg_queue = NULL;
+
+esp_err_t app_arch_ui_update(ui_update_type_t type, void *data)
+{
+    if (ui_msg_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ui_update_msg_t msg;
+    msg.type = type;
+    
+    // 根据类型拷贝数据
+    switch(type) {
+        case UI_UPDATE_KEY:
+            msg.data.key_id = *(uint8_t *)data;
+            break;
+        case UI_UPDATE_BATTERY:
+            msg.data.voltage = *(float *)data;
+            break;
+        case UI_UPDATE_RTC:
+            memcpy(&msg.data.rtc_time, data, sizeof(rtc_time_t));
+            break;
+        case UI_UPDATE_SENSOR:
+            memcpy(&msg.data.sensor, data, sizeof(sensor_data_t));
+            break;
+        default:
+            msg.data.custom_data = data;
+            break;
+    }
+    
+    // 非阻塞发送到 UI 消息队列
+    if (xQueueSend(ui_msg_queue, &msg, 0) == pdPASS) {
+        return ESP_OK;
+    }
+    return ESP_ERR_NO_MEM;  // 队列满，丢弃
+}
+```
+
+**UI 任务接收**：
+```c
+void Task_LvglUI(void *arg)
+{
+    ui_update_msg_t msg;
+    while(1)
+    {
+        if(xQueueReceive(ui_msg_queue, &msg, 0) == pdPASS)
+        {
+            switch(msg.type)
+            {
+                case UI_UPDATE_KEY:
+                    lv_label_set_text(label_key, key_name[msg.data.key_id]);
+                    break;
+                case UI_UPDATE_RTC:
+                    update_clock_display(msg.data.rtc_time);
+                    break;
+                case UI_UPDATE_BATTERY:
+                    update_battery_display(msg.data.voltage);
+                    break;
+                case UI_UPDATE_SENSOR:
+                    update_sensor_display(msg.data.sensor);
+                    break;
+                default:
+                    break;
+            }
+        }
+        lv_task_handler();
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+```
+
+**优势**：
+- ✅ 外部任务只需调用 `app_arch_ui_update()`，无需知道消息队列细节
+- ✅ 线程安全：内部使用 FreeRTOS 消息队列，自动处理并发
+- ✅ 解耦：传感器任务不依赖 UI 框架，只依赖 `app_arch` 层
+- ✅ 可扩展：新增 UI 更新类型只需在枚举和 switch-case 中添加
+
+#### 2.5 中间件简化原则
+
+- **最多一层中间件**：任务层 → app_arch 层 → 中间层（可选）→ 驱动层
 - 中间件职责单一：仅做数据格式转换或消息路由
 - 避免多层封装：直接在任务中调用驱动 API
+- app_arch 层是可选的，仅在需要跨任务 UI 更新时使用
 
 #### 2.5 ESP32 特有配置（重要）
 
@@ -282,10 +444,12 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 ##### 2.6.1 禁止事项
 - ❌ 禁止使用 `goto` 语句
 - ❌ 禁止跨任务直接调用 UI API（如 `lv_label_set_text()`）
+- ❌ 禁止外部任务直接操作 UI 消息队列（应通过 `app_arch_ui_update()` 接口）
 - ❌ 禁止在多个任务中访问同一 IO（如 DS1302 只能在系统外设任务中访问）
 - ❌ 禁止多层中间件封装
 
 ##### 2.6.2 推荐做法
+- ✅ 使用 `app_arch_ui_update()` 接口更新 UI（外部任务统一调用此接口）
 - ✅ 使用 `switch-case` 分支处理消息类型
 - ✅ 使用消息队列解耦任务
 - ✅ 使用 `xQueueSend(..., 0)` 非阻塞发送（允许丢包的场景）
@@ -509,6 +673,11 @@ project/
 │       ├── dht11.h
 │       └── dht11.c
 │
+├── app_arch/                       # 应用架构层（线程安全 UI 更新封装）⭐ 新增
+│   ├── CMakeLists.txt
+│   ├── app_arch_ui.h               # UI 更新接口定义（外部任务调用）
+│   └── app_arch_ui.c               # UI 更新接口实现（内部封装消息队列）
+│
 ├── tasks/                          # FreeRTOS 任务
 │   ├── CMakeLists.txt
 │   ├── task_ui.c                   # UI 任务（仅当项目中无 LVGL 任务时创建）
@@ -540,7 +709,7 @@ project/
 idf_component_register(
     SRCS "app_main.c"
     INCLUDE_DIRS "."
-    REQUIRES tasks middleware drivers lvgl ds1302
+    REQUIRES tasks app_arch middleware drivers lvgl ds1302
 )
 ```
 
@@ -553,6 +722,15 @@ idf_component_register(
 )
 ```
 
+**app_arch/CMakeLists.txt 示例**：⭐ 新增
+```cmake
+idf_component_register(
+    SRCS "app_arch_ui.c"
+    INCLUDE_DIRS "."
+    REQUIRES middleware freertos
+)
+```
+
 **tasks/CMakeLists.txt 示例**：
 
 **情况 A：新建 UI 任务（项目中无 LVGL 任务时）**
@@ -560,7 +738,7 @@ idf_component_register(
 idf_component_register(
     SRCS "task_ui.c" "task_system_periph.c" "task_printer.c"
     INCLUDE_DIRS "."
-    REQUIRES middleware drivers lvgl ds1302
+    REQUIRES app_arch middleware drivers lvgl ds1302
 )
 ```
 
@@ -570,7 +748,7 @@ idf_component_register(
 idf_component_register(
     SRCS "task_system_periph.c" "task_printer.c"
     INCLUDE_DIRS "."
-    REQUIRES middleware drivers lvgl ds1302
+    REQUIRES app_arch middleware drivers lvgl ds1302
 )
 ```
 
@@ -707,6 +885,122 @@ idf_component_register(
 - xQueueReceive 第三个参数是等待时间，portMAX_DELAY = 一直等到有信为止
 - 消息结构体不要太大，建议不超过 64 字节，太大占内存
 - 一个队列可以被多个任务发送，但建议只有一个任务接收，避免混乱
+```
+
+**（3）app_arch 层：线程安全的 UI 更新接口（必须输出）** ⭐ 新增
+
+必须用大白话讲清楚 app_arch 层的作用和使用方法，包含：
+- app_arch 层是什么（用比喻解释）
+- 为什么需要 app_arch 层（解耦、线程安全）
+- 外部任务怎么调用 app_arch 接口更新 UI
+- 代码示例（基于实际生成的 task_system_periph.c）
+
+输出格式参考（必须按此格式写出实际内容）：
+```
+app_arch 层怎么用？（大白话版）：
+
+打个比方：app_arch 层就是一个"翻译官"或者"前台接待"。
+- 传感器任务想更新 UI，但不想直接操作消息队列（太麻烦、容易出错）
+- 传感器任务只需调用 app_arch_ui_update() 函数，把数据交给"翻译官"
+- "翻译官"会自动把数据打包成消息，塞进消息队列
+- UI 任务从消息队列取出来，更新界面
+
+【为什么需要 app_arch 层？】
+
+1. 解耦：传感器任务不需要知道消息队列的存在，只需要调用简单函数
+2. 线程安全：app_arch 内部使用 FreeRTOS 消息队列，自动处理并发
+3. 统一接口：所有外部任务都通过同一个接口更新 UI，方便维护
+4. 可扩展：新增 UI 更新类型只需在枚举和 switch-case 中添加
+
+【发送端示例】—— 在 task_system_periph.c 中，传感器读取后通过 app_arch 层更新 UI：
+
+    #include "app_arch_ui.h"  // 引入 app_arch 层接口
+    
+    void Task_SystemPeriph(void *arg)
+    {
+        while(1)
+        {
+            // 读取传感器数据
+            float temp = dht11_read_temp();
+            
+            // 通过 app_arch 层更新 UI（线程安全，一行搞定）
+            app_arch_ui_update(UI_UPDATE_SENSOR, &temp);
+            
+            // 或者更新电池电压
+            float voltage = adc_read_battery();
+            app_arch_ui_update(UI_UPDATE_BATTERY, &voltage);
+            
+            // 或者更新 RTC 时间
+            rtc_time_t time;
+            ds1302_read_time(&time);
+            app_arch_ui_update(UI_UPDATE_RTC, &time);
+            
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+【接收端示例】—— 在 task_ui.c 中，UI 任务从消息队列取消息并更新界面：
+
+    void Task_LvglUI(void *arg)
+    {
+        ui_update_msg_t msg;
+        while(1)
+        {
+            // 从消息队列取消息
+            if(xQueueReceive(ui_msg_queue, &msg, 0) == pdPASS)
+            {
+                switch(msg.type)
+                {
+                    case UI_UPDATE_SENSOR:
+                        // 更新传感器显示
+                        update_sensor_display(msg.data.sensor);
+                        break;
+                    case UI_UPDATE_BATTERY:
+                        // 更新电池电压显示
+                        update_battery_display(msg.data.voltage);
+                        break;
+                    case UI_UPDATE_RTC:
+                        // 更新时钟显示
+                        update_clock_display(msg.data.rtc_time);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            lv_task_handler();
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+
+【app_arch 层内部实现】—— 在 app_arch/app_arch_ui.c 中：
+
+    // 内部封装了消息队列操作
+    esp_err_t app_arch_ui_update(ui_update_type_t type, void *data)
+    {
+        ui_update_msg_t msg;
+        msg.type = type;
+        
+        // 根据类型拷贝数据
+        switch(type) {
+            case UI_UPDATE_SENSOR:
+                memcpy(&msg.data.sensor, data, sizeof(sensor_data_t));
+                break;
+            case UI_UPDATE_BATTERY:
+                msg.data.voltage = *(float *)data;
+                break;
+            // ... 其他类型
+        }
+        
+        // 非阻塞发送到 UI 消息队列
+        return xQueueSend(ui_msg_queue, &msg, 0) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    }
+
+注意点：
+- 外部任务只需 #include "app_arch_ui.h" 并调用 app_arch_ui_update()
+- 不需要知道消息队列的细节，app_arch 层自动处理
+- 线程安全：多个任务可以同时调用 app_arch_ui_update()，不会冲突
+- 队列满了会丢弃消息（非阻塞），避免阻塞传感器任务
+- 新增 UI 更新类型：在 ui_update_type_t 枚举中添加，在 switch-case 中处理
 ```
 
 ##### 4.1.5 组件与任务内部函数关联说明（强制输出要求）
@@ -1190,10 +1484,11 @@ lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN) → 显示
 ```
 
 ##### 4.1.7 修改指南
-- 如何添加新传感器：在 drivers/ 下新建文件 → 在 task_system_periph.c 中 #include 并调用 → 添加新的消息类型
+- 如何添加新传感器：在 drivers/ 下新建文件 → 在 task_system_periph.c 中 #include 并调用 → 在 `app_arch_ui.h` 的 `ui_update_type_t` 枚举中添加新类型 → 在 `app_arch_ui.c` 的 switch-case 中添加数据拷贝逻辑 → 在 UI 任务的 switch-case 中添加显示处理
 - 如何添加新任务：在 tasks/ 下新建 task_xxx.c → 在 CMakeLists.txt 中添加源文件 → 在 app_arch_init() 中 xTaskCreate
 - 如何调整任务优先级：修改 app_arch_init() 中 xTaskCreate 的第 5 个参数
-- 如何修改消息类型：在 middleware/msg_queue.h 中的枚举里添加新类型，在 UI 任务的 switch-case 中添加对应处理
+- 如何新增 UI 更新类型：在 `app_arch/app_arch_ui.h` 的 `ui_update_type_t` 枚举中添加新类型 → 在 `app_arch_ui.c` 的 `app_arch_ui_update()` 函数中添加对应的数据拷贝逻辑 → 在 UI 任务的 `xQueueReceive` 后的 switch-case 中添加对应的 UI 更新处理
+- 如何使用 app_arch 层更新 UI：在外部任务中 `#include "app_arch_ui.h"` → 调用 `app_arch_ui_update(UI_UPDATE_XXX, &data)` → 无需直接操作消息队列
 
 ---
 
