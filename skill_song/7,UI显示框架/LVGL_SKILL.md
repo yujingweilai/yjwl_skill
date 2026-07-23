@@ -63,6 +63,28 @@ description: "Designs C UI state-machine frameworks for LVGL displays. Invoke wh
 
 **必须等用户回答后再开始写代码，不要替用户做决定。**
 
+### 第 3 问：UI 框架内部是否已有接口函数？（强制询问）
+
+向用户确认：
+
+> "你的 UI 框架内部是否已经有接口函数？比如 `ui_partial_update()`（局部数据更新）、`ui_cross_page_update()`（跨页面数据更新）等？如果有的话，请把接口函数的声明或页面截图发给我，我会沿用你现有的接口设计。"
+
+- **有接口函数** → 用户提供接口函数声明或截图后，必须沿用现有接口命名、参数风格和调用方式，不能重新造一套
+- **没有接口函数** → 使用本 skill 提供的默认接口函数（见"局部数据更新接口"和"跨页面数据更新接口"章节）
+
+**必须等用户回答后再开始写代码。**
+
+### 第 4 问：外部传感器数据类型有哪些？（强制询问）
+
+向用户确认：
+
+> "你有哪些外部传感器或数据源需要更新到 UI 上？比如温度、湿度、电池电量、时间等？它们的数据类型是什么（整型、浮点、字符串）？"
+
+- 根据用户回答，为每种传感器数据在 `ui_context_t` 中增加对应的数据字段
+- 为每种传感器数据生成对应的局部更新函数
+
+**必须等用户回答后再开始写代码。**
+
 ---
 
 ## 核心设计原则
@@ -539,6 +561,333 @@ bool ui_update_display(ui_context_t *ctx)
     }
 
     return result;
+}
+```
+
+---
+
+## 数据更新接口（强制要求）
+
+**以下两个接口函数是强制性要求，所有 LVGL UI 框架必须实现。**
+
+### 局部数据更新接口（同页面数据刷新）
+
+**大白话：当外部传感器数据变化时，只需要更新当前页面上的某一块 LVGL 控件，不需要整个页面重画。**
+
+```c
+/**
+ * @brief 局部数据更新函数（同页面刷新）
+ * @param ctx UI 上下文指针
+ * @param item_id 要更新的 UI 区块编号（比如 0=温度标签，1=湿度标签）
+ * @param data 新数据指针（根据数据类型可以是整型、浮点、字符串等）
+ * @param data_len 数据长度（字符串类型需要，整型/浮点可填 0）
+ * @return true 更新成功，false 参数无效或当前页面不支持该区块
+ * @note 作用：只刷新当前页面上指定的 LVGL 控件文本，避免整个页面重绘
+ *       适用于传感器数据频繁变化的场景，比如温度、湿度、电量等
+ *       调用后会自动设置 need_refresh = 1
+ *       RTOS 环境下会自动加锁保护 LVGL 操作
+ */
+bool ui_partial_update(ui_context_t *ctx, uint8_t item_id, const void *data, uint16_t data_len);
+```
+
+**使用示例：**
+
+```c
+/* 示例 1：更新当前页面的温度标签（整型） */
+int16_t temperature = 25;
+ui_partial_update(&ui_ctx, 0, &temperature, 0);
+
+/* 示例 2：更新当前页面的湿度标签（浮点） */
+float humidity = 65.5f;
+ui_partial_update(&ui_ctx, 1, &humidity, 0);
+
+/* 示例 3：更新当前页面的商品名称标签（字符串） */
+char name[] = "Chicken";
+ui_partial_update(&ui_ctx, 2, name, sizeof(name));
+```
+
+**实现示例（LVGL 版本）：**
+
+```c
+/**
+ * @brief 局部数据更新函数实现（LVGL 版本）
+ * @param ctx UI 上下文指针
+ * @param item_id 要更新的 UI 区块编号
+ * @param data 新数据指针
+ * @param data_len 数据长度
+ * @return true 更新成功
+ * @note 作用：根据当前页面状态和 item_id，只更新指定 LVGL 控件的文本
+ */
+bool ui_partial_update(ui_context_t *ctx, uint8_t item_id, const void *data, uint16_t data_len)
+{
+    if (ctx == NULL || data == NULL) {
+        printf("UI partial update failed: invalid param\r\n");
+        return false;
+    }
+
+    /* RTOS 环境：加锁保护 LVGL 操作 */
+    xSemaphoreTakeRecursive(lvgl_mutex, portMAX_DELAY);
+
+    /* 根据当前页面状态，更新对应的数据字段和 LVGL 控件 */
+    switch (ctx->current_state) {
+        case UI_STATE_LABEL_PREVIEW:
+            /* 预览页面的局部更新 */
+            switch (item_id) {
+                case 0:  /* 温度标签 */
+                    ctx->preview_data.temperature = *(int16_t *)data;
+                    if (g_temp_label != NULL) {
+                        char buf[16];
+                        sprintf(buf, "%d C", ctx->preview_data.temperature);
+                        lv_label_set_text(g_temp_label, buf);
+                    }
+                    break;
+                case 1:  /* 湿度标签 */
+                    ctx->preview_data.humidity = *(float *)data;
+                    if (g_humidity_label != NULL) {
+                        char buf[16];
+                        sprintf(buf, "%.1f%%", ctx->preview_data.humidity);
+                        lv_label_set_text(g_humidity_label, buf);
+                    }
+                    break;
+                case 2:  /* 商品名称标签 */
+                    strncpy(ctx->preview_data.l_product_name, (char *)data,
+                            sizeof(ctx->preview_data.l_product_name) - 1);
+                    if (g_name_label != NULL) {
+                        lv_label_set_text(g_name_label, ctx->preview_data.l_product_name);
+                    }
+                    break;
+                default:
+                    printf("UI partial update: unknown item_id=%d\r\n", item_id);
+                    xSemaphoreGiveRecursive(lvgl_mutex);
+                    return false;
+            }
+            break;
+
+        case UI_STATE_SETTING:
+            /* 设置页面的局部更新 */
+            switch (item_id) {
+                case 0:  /* 电池电量标签 */
+                    ctx->seting_data.battery_level = *(uint8_t *)data;
+                    if (g_battery_label != NULL) {
+                        char buf[16];
+                        sprintf(buf, "%d%%", ctx->seting_data.battery_level);
+                        lv_label_set_text(g_battery_label, buf);
+                    }
+                    break;
+                default:
+                    printf("UI partial update: unknown item_id=%d\r\n", item_id);
+                    xSemaphoreGiveRecursive(lvgl_mutex);
+                    return false;
+            }
+            break;
+
+        default:
+            printf("UI partial update: unsupported state=%d\r\n", ctx->current_state);
+            xSemaphoreGiveRecursive(lvgl_mutex);
+            return false;
+    }
+
+    xSemaphoreGiveRecursive(lvgl_mutex);
+
+    /* 标记需要刷新 */
+    ctx->need_refresh = 1;
+    ctx->partial_update_flag = 1;
+    ctx->partial_item_id = item_id;
+
+    printf("UI partial update: state=%d item=%d\r\n", ctx->current_state, item_id);
+    return true;
+}
+```
+
+### 跨页面数据更新接口（跨页面数据刷新）
+
+**大白话：当数据变化时，如果目标数据不在当前页面，需要先切换到目标页面，再用局部更新的方式刷新 LVGL 控件。**
+
+```c
+/**
+ * @brief 跨页面数据更新函数
+ * @param ctx UI 上下文指针
+ * @param target_state 目标页面状态（数据要更新到哪个页面）
+ * @param item_id 目标页面上的 UI 区块编号
+ * @param data 新数据指针
+ * @param data_len 数据长度（字符串类型需要，整型/浮点可填 0）
+ * @return true 更新成功，false 参数无效
+ * @note 作用：先切换到目标页面，再用局部更新的方式刷新 LVGL 控件
+ *       适用于传感器数据需要显示在非当前页面的场景
+ *       调用流程：1.切换页面 → 2.局部更新数据 → 3.刷新显示
+ */
+bool ui_cross_page_update(ui_context_t *ctx, ui_state_t target_state,
+                          uint8_t item_id, const void *data, uint16_t data_len);
+```
+
+**使用示例：**
+
+```c
+/* 示例：当前在主菜单，但需要更新预览页面的温度数据 */
+int16_t temperature = 25;
+ui_cross_page_update(&ui_ctx, UI_STATE_LABEL_PREVIEW, 0, &temperature, 0);
+
+/* 执行流程：
+ * 1. 先调用 ui_state_machine_switch() 切换到 UI_STATE_LABEL_PREVIEW
+ * 2. 再调用 ui_partial_update() 更新 item_id=0 的温度标签
+ * 3. 自动设置 need_refresh = 1，lv_task_handler() 会刷新显示
+ */
+```
+
+**实现示例（LVGL 版本）：**
+
+```c
+/**
+ * @brief 跨页面数据更新函数实现（LVGL 版本）
+ * @param ctx UI 上下文指针
+ * @param target_state 目标页面状态
+ * @param item_id 目标页面上的 UI 区块编号
+ * @param data 新数据指针
+ * @param data_len 数据长度
+ * @return true 更新成功
+ * @note 作用：先切换到目标页面，再用局部更新刷新 LVGL 控件
+ */
+bool ui_cross_page_update(ui_context_t *ctx, ui_state_t target_state,
+                          uint8_t item_id, const void *data, uint16_t data_len)
+{
+    if (ctx == NULL || data == NULL) {
+        printf("UI cross update failed: invalid param\r\n");
+        return false;
+    }
+
+    if (target_state >= UI_STATE_MAX) {
+        printf("UI cross update failed: invalid state=%d\r\n", target_state);
+        return false;
+    }
+
+    /* 第 1 步：如果当前不在目标页面，先切换过去 */
+    if (ctx->current_state != target_state) {
+        if (!ui_state_machine_switch(ctx, target_state)) {
+            printf("UI cross update: switch to state=%d failed\r\n", target_state);
+            return false;
+        }
+        printf("UI cross update: switched from %d to %d\r\n",
+               ctx->previous_state, target_state);
+    }
+
+    /* 第 2 步：在目标页面上执行局部更新 */
+    if (!ui_partial_update(ctx, item_id, data, data_len)) {
+        printf("UI cross update: partial update failed at state=%d item=%d\r\n",
+               target_state, item_id);
+        return false;
+    }
+
+    printf("UI cross update: state=%d item=%d success\r\n", target_state, item_id);
+    return true;
+}
+```
+
+### 局部更新与全页刷新的区别（LVGL 版本）
+
+| 更新方式 | 函数 | 适用场景 | 性能 |
+|---------|------|---------|------|
+| 局部更新 | `ui_partial_update()` | 传感器数据频繁变化，只更新某个 LVGL 控件文本 | 高（只刷新局部） |
+| 跨页面更新 | `ui_cross_page_update()` | 数据需要显示在非当前页面 | 中（先切页再局部刷新） |
+| 全页刷新 | `ui_update_display()` | 页面切换、焦点移动、整体布局变化 | 低（整个页面重绘） |
+
+### 在 ui_context_t 中增加局部更新相关字段（LVGL 版本）
+
+```c
+typedef struct {
+    /* ... 原有字段 ... */
+
+    uint8_t need_refresh;        /* 刷新标志：1=需要重新画画面，0=不用画 */
+
+    /* 局部更新相关字段（强制要求） */
+    uint8_t partial_update_flag; /* 局部更新标志：1=只刷新局部区域，0=全页刷新 */
+    uint8_t partial_item_id;     /* 局部更新的区块编号：0=温度，1=湿度，2=名称... */
+
+    /* LVGL 特有：页面切换动画 */
+    lv_scr_load_anim_t anim_type;
+    uint32_t anim_time;
+} ui_context_t;
+```
+
+### LVGL 页面绘制函数如何支持局部更新
+
+```c
+/* 静态变量保存 LVGL 对象 */
+static lv_obj_t *preview_screen = NULL;
+static lv_obj_t *g_temp_label = NULL;
+static lv_obj_t *g_humidity_label = NULL;
+static lv_obj_t *g_name_label = NULL;
+
+/**
+ * @brief 预览页面绘制函数（LVGL 版本，支持局部更新）
+ * @param ctx UI 上下文指针
+ * @return true 画好了
+ * @note 作用：根据 partial_update_flag 决定是全页重绘还是只更新局部 LVGL 控件
+ */
+bool ui_draw_label_preview(ui_context_t *ctx)
+{
+    /* 第一次进入时创建 LVGL 控件 */
+    if (preview_screen == NULL) {
+        preview_screen = lv_obj_create(NULL);
+
+        lv_obj_t *title = lv_label_create(preview_screen);
+        lv_label_set_text(title, "Label Preview");
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+        g_temp_label = lv_label_create(preview_screen);
+        lv_obj_align(g_temp_label, LV_ALIGN_TOP_LEFT, 10, 40);
+
+        g_humidity_label = lv_label_create(preview_screen);
+        lv_obj_align(g_humidity_label, LV_ALIGN_TOP_LEFT, 10, 60);
+
+        g_name_label = lv_label_create(preview_screen);
+        lv_obj_align(g_name_label, LV_ALIGN_TOP_LEFT, 10, 80);
+    }
+
+    /* 如果是局部更新，只更新指定控件的文本 */
+    if (ctx->partial_update_flag == 1) {
+        switch (ctx->partial_item_id) {
+            case 0:  /* 只更新温度标签 */
+                if (g_temp_label != NULL) {
+                    char buf[16];
+                    sprintf(buf, "%d C", ctx->preview_data.temperature);
+                    lv_label_set_text(g_temp_label, buf);
+                }
+                break;
+            case 1:  /* 只更新湿度标签 */
+                if (g_humidity_label != NULL) {
+                    char buf[16];
+                    sprintf(buf, "%.1f%%", ctx->preview_data.humidity);
+                    lv_label_set_text(g_humidity_label, buf);
+                }
+                break;
+            case 2:  /* 只更新商品名称标签 */
+                if (g_name_label != NULL) {
+                    lv_label_set_text(g_name_label, ctx->preview_data.l_product_name);
+                }
+                break;
+        }
+
+        /* 清除局部更新标志 */
+        ctx->partial_update_flag = 0;
+        ctx->partial_item_id = 0;
+
+        /* 切换到这个页面 */
+        lv_scr_load_anim(preview_screen, ctx->anim_type, ctx->anim_time, 0, false);
+        return true;
+    }
+
+    /* 全页刷新：更新所有控件文本 */
+    char buf[16];
+    sprintf(buf, "%d C", ctx->preview_data.temperature);
+    lv_label_set_text(g_temp_label, buf);
+
+    sprintf(buf, "%.1f%%", ctx->preview_data.humidity);
+    lv_label_set_text(g_humidity_label, buf);
+
+    lv_label_set_text(g_name_label, ctx->preview_data.l_product_name);
+
+    lv_scr_load_anim(preview_screen, ctx->anim_type, ctx->anim_time, 0, false);
+    return true;
 }
 ```
 
@@ -1921,6 +2270,8 @@ while (1) {
 | `stack_top` | `uint8_t` | 页面栈的栈顶，表示栈里有多少个页面 |
 | `anim_type` | `lv_scr_load_anim_t` | LVGL 页面切换动画类型（淡入、滑动等） |
 | `anim_time` | `uint32_t` | 动画时长（毫秒） |
+| `partial_update_flag` | `uint8_t` | 局部更新标志（1=只刷新局部 LVGL 控件，0=全页刷新）【强制要求】 |
+| `partial_item_id` | `uint8_t` | 局部更新的区块编号（0=温度标签，1=湿度标签，2=名称标签...）【强制要求】 |
 
 #### 10.2 `ui_event_t` 事件类型
 
@@ -1960,9 +2311,271 @@ bool ui_update_display(ui_context_t *ctx);
 /* ctx：UI 上下文指针 */
 ```
 
-### 十一、扩展接口函数使用（LVGL 版本）
+### 十一、如何使用局部数据更新接口（LVGL 版本，强制要求）
 
-#### 11.1 页面栈操作（用于多级返回）
+**大白话：传感器数据变了，不需要整个页面重画，只更新对应 LVGL 控件的文本就行。**
+
+#### 11.1 什么时候用局部更新？
+
+| 场景 | 用什么 | 原因 |
+|------|--------|------|
+| 温度从 25°C 变成 26°C | `ui_partial_update()` | 只变了数字，其他控件没变 |
+| 电池电量从 80% 变成 79% | `ui_partial_update()` | 只变了数字，其他控件没变 |
+| 用户按了确认键进入新页面 | `ui_state_machine_switch()` | 整个页面都变了，必须全画 |
+| 用户上下移动焦点 | 设 `need_refresh = 1` | 高亮位置变了，需要全页刷新 |
+
+#### 11.2 使用步骤
+
+```c
+/* 第 1 步：准备好新数据 */
+int16_t new_temp = 26;
+
+/* 第 2 步：调用局部更新函数 */
+/* 参数说明：
+ *   &ui_ctx      - UI 上下文指针
+ *   0            - item_id，表示要更新第 0 号区块（比如温度标签）
+ *   &new_temp    - 新数据指针
+ *   0            - data_len，整型数据填 0 就行
+ */
+ui_partial_update(&ui_ctx, 0, &new_temp, 0);
+
+/* 第 3 步：UI 任务自动刷新 */
+/* ui_partial_update() 内部已经设了 need_refresh = 1
+ * UI 任务检测到 need_refresh == 1 就会调用 ui_update_display()
+ * ui_update_display() 调用 ui_draw_xxx()
+ * ui_draw_xxx() 检测到 partial_update_flag == 1，只更新指定 LVGL 控件
+ */
+```
+
+#### 11.3 item_id 怎么定义？
+
+**大白话：item_id 就是页面上每个 LVGL 控件的编号，你自己定义。**
+
+```c
+/* 例如预览页面的区块定义 */
+#define PREVIEW_ITEM_TEMPERATURE    0   /* 温度标签 */
+#define PREVIEW_ITEM_HUMIDITY       1   /* 湿度标签 */
+#define PREVIEW_ITEM_PRODUCT_NAME   2   /* 商品名称标签 */
+#define PREVIEW_ITEM_DATE           3   /* 日期标签 */
+
+/* 例如设置页面的区块定义 */
+#define SETTING_ITEM_BATTERY        0   /* 电池电量标签 */
+#define SETTING_ITEM_BRIGHTNESS     1   /* 亮度标签 */
+```
+
+> 大白话：每个页面有哪些显示控件，就定义多少个 item_id。不同页面的 item_id 从 0 开始重新编号，互不干扰。
+
+#### 11.4 页面绘制函数如何支持局部更新（LVGL 版本）
+
+```c
+bool ui_draw_label_preview(ui_context_t *ctx)
+{
+    /* 第一次进入时创建 LVGL 控件 */
+    if (preview_screen == NULL) {
+        preview_screen = lv_obj_create(NULL);
+        g_temp_label = lv_label_create(preview_screen);
+        g_humidity_label = lv_label_create(preview_screen);
+        g_name_label = lv_label_create(preview_screen);
+        /* ... 对齐等样式设置 ... */
+    }
+
+    /* 检查是否是局部更新 */
+    if (ctx->partial_update_flag == 1) {
+        /* 只更新指定 LVGL 控件的文本 */
+        switch (ctx->partial_item_id) {
+            case PREVIEW_ITEM_TEMPERATURE:
+                if (g_temp_label != NULL) {
+                    char buf[16];
+                    sprintf(buf, "%d C", ctx->preview_data.temperature);
+                    lv_label_set_text(g_temp_label, buf);
+                }
+                break;
+
+            case PREVIEW_ITEM_HUMIDITY:
+                if (g_humidity_label != NULL) {
+                    char buf[16];
+                    sprintf(buf, "%.1f%%", ctx->preview_data.humidity);
+                    lv_label_set_text(g_humidity_label, buf);
+                }
+                break;
+        }
+
+        /* 清除局部更新标志 */
+        ctx->partial_update_flag = 0;
+        ctx->partial_item_id = 0;
+
+        /* 切换到这个页面 */
+        lv_scr_load_anim(preview_screen, ctx->anim_type, ctx->anim_time, 0, false);
+        return true;
+    }
+
+    /* 不是局部更新 → 全页刷新：更新所有控件 */
+    /* ... 更新所有 LVGL 控件文本 ... */
+    lv_scr_load_anim(preview_screen, ctx->anim_type, ctx->anim_time, 0, false);
+    return true;
+}
+```
+
+> 大白话：页面函数里先检查 `partial_update_flag`，如果是 1 就只更新指定 LVGL 控件的文本，更新完把标志清零。如果是 0 就更新所有控件。
+
+#### 11.5 外部传感器数据如何接入（LVGL 版本）
+
+```c
+/* 传感器任务：每 1 秒读一次温度 */
+void Task_Sensor(void *arg)
+{
+    while (1) {
+        /* 第 1 步：读取传感器数据 */
+        int16_t temp = DHT11_ReadTemperature();
+
+        /* 第 2 步：判断当前在哪个页面 */
+        if (ui_ctx.current_state == UI_STATE_LABEL_PREVIEW) {
+            /* 当前在预览页 → 直接局部更新温度标签 */
+            ui_partial_update(&ui_ctx, PREVIEW_ITEM_TEMPERATURE, &temp, 0);
+        } else {
+            /* 当前不在预览页 → 只更新数据，不刷新显示 */
+            ui_ctx.preview_data.temperature = temp;
+            /* 等用户切到预览页时自然会显示最新数据 */
+        }
+
+        vTaskDelay(1000);
+    }
+}
+```
+
+> 大白话：传感器数据变了，先看当前在哪个页面。如果在显示这个数据的页面，就调 `ui_partial_update()` 局部刷新 LVGL 控件。如果不在，就只更新数据，等用户切过去时自然会显示最新值。
+
+### 十二、如何使用跨页面数据更新接口（LVGL 版本，强制要求）
+
+**大白话：数据需要显示在别的页面，先切到那个页面，再局部更新 LVGL 控件。**
+
+#### 12.1 什么时候用跨页面更新？
+
+| 场景 | 用什么 | 原因 |
+|------|--------|------|
+| 当前在主菜单，需要更新预览页温度 | `ui_cross_page_update()` | 数据在别的页面 |
+| 当前在设置页，需要更新预览页商品名 | `ui_cross_page_update()` | 数据在别页面 |
+| 当前在预览页，需要更新预览页温度 | `ui_partial_update()` | 数据在当前页面，不需要切页 |
+
+#### 12.2 使用步骤
+
+```c
+/* 第 1 步：准备好新数据 */
+int16_t new_temp = 26;
+
+/* 第 2 步：调用跨页面更新函数 */
+/* 参数说明：
+ *   &ui_ctx                  - UI 上下文指针
+ *   UI_STATE_LABEL_PREVIEW   - 目标页面状态（数据要更新到哪个页面）
+ *   PREVIEW_ITEM_TEMPERATURE - 目标页面上的区块编号
+ *   &new_temp                - 新数据指针
+ *   0                        - data_len
+ */
+ui_cross_page_update(&ui_ctx, UI_STATE_LABEL_PREVIEW,
+                     PREVIEW_ITEM_TEMPERATURE, &new_temp, 0);
+
+/* 执行流程：
+ * 1. 检查当前是否在 UI_STATE_LABEL_PREVIEW
+ * 2. 如果不在 → 调用 ui_state_machine_switch() 切过去
+ * 3. 调用 ui_partial_update() 局部更新温度标签
+ * 4. 自动设 need_refresh = 1，lv_task_handler() 刷新显示
+ */
+```
+
+#### 12.3 跨页面更新 vs 手动切页+局部更新
+
+```c
+/* 方式 1：用跨页面更新函数（推荐，一行搞定） */
+ui_cross_page_update(&ui_ctx, UI_STATE_LABEL_PREVIEW,
+                     PREVIEW_ITEM_TEMPERATURE, &new_temp, 0);
+
+/* 方式 2：手动切页 + 局部更新（效果一样，但要写两行） */
+if (ui_ctx.current_state != UI_STATE_LABEL_PREVIEW) {
+    ui_state_machine_switch(&ui_ctx, UI_STATE_LABEL_PREVIEW);
+}
+ui_partial_update(&ui_ctx, PREVIEW_ITEM_TEMPERATURE, &new_temp, 0);
+```
+
+> 大白话：`ui_cross_page_update()` 就是把"切页 + 局部更新"两步合成了一步，写起来更方便。
+
+#### 12.4 外部传感器数据如何跨页面更新（LVGL 版本）
+
+```c
+/* 传感器任务：每 1 秒读一次温度 */
+void Task_Sensor(void *arg)
+{
+    while (1) {
+        int16_t temp = DHT11_ReadTemperature();
+
+        /* 不管当前在哪个页面，都强制更新到预览页 */
+        ui_cross_page_update(&ui_ctx, UI_STATE_LABEL_PREVIEW,
+                             PREVIEW_ITEM_TEMPERATURE, &temp, 0);
+
+        vTaskDelay(1000);
+    }
+}
+```
+
+> 大白话：如果希望传感器数据变化时，不管用户在哪个页面，都强制切到目标页面并更新 LVGL 控件显示，就用 `ui_cross_page_update()`。
+
+### 十三、局部更新与跨页面更新流程图（LVGL 版本）
+
+```
+外部传感器数据变化
+    ↓
+┌─────────────────────────────────────┐
+│ 判断：数据要更新到哪个页面？          │
+└──────────────┬──────────────────────┘
+               │
+       ┌───────┴───────┐
+       ↓               ↓
+  当前页面          其他页面
+       │               │
+       ↓               ↓
+ ui_partial_update()  ui_cross_page_update()
+ （局部更新 LVGL 控件）│
+       │               ↓
+       │        ┌──────────────────────┐
+       │        │ 当前是否在目标页面？   │
+       │        └──────┬───────────────┘
+       │               │
+       │        ┌──────┴──────┐
+       │        ↓             ↓
+       │       是            否
+       │        │             │
+       │        │             ↓
+       │        │    ui_state_machine_switch()
+       │        │    （先切换到目标页面）
+       │        │             │
+       │        └──────┬──────┘
+       │               ↓
+       │        ui_partial_update()
+       │        （局部更新 LVGL 控件）
+       │               │
+       └───────┬───────┘
+               ↓
+    ctx->need_refresh = 1
+    ctx->partial_update_flag = 1
+    ctx->partial_item_id = item_id
+               ↓
+    UI 任务检测到 need_refresh == 1
+               ↓
+    ui_update_display() → ui_draw_xxx()
+               ↓
+    ui_draw_xxx() 检测 partial_update_flag == 1
+               ↓
+    只更新指定 LVGL 控件文本（lv_label_set_text）
+               ↓
+    lv_scr_load_anim() 切换页面
+               ↓
+    lv_task_handler() 让 LVGL 真正刷新屏幕
+               ↓
+    清除 partial_update_flag = 0
+```
+
+### 十四、扩展接口函数使用（LVGL 版本）
+
+#### 14.1 页面栈操作（用于多级返回）
 
 ```c
 /**
@@ -2019,7 +2632,7 @@ case UI_STATE_SETTING:
     break;
 ```
 
-#### 11.2 页面生命周期管理（LVGL 特有）
+#### 14.2 页面生命周期管理（LVGL 特有）
 
 **大白话：LVGL 页面有创建、进入、刷新、退出、销毁五个阶段，需要手动管理。**
 
@@ -2058,7 +2671,7 @@ static void gauge_page_exit(ui_context_t *ctx)
 }
 ```
 
-#### 11.3 线程安全（RTOS 环境强制要求）
+#### 14.3 线程安全（RTOS 环境强制要求）
 
 **大白话：LVGL 不是线程安全的，多个任务同时操作 LVGL 对象会崩溃！必须加锁！**
 
@@ -2082,7 +2695,7 @@ lvgl_port_unlock();
 - UI 任务和数据更新任务同时操作同一个 LVGL 对象
 - 内存损坏、程序崩溃、屏幕花屏
 
-#### 11.4 数据更新接口
+#### 14.4 数据更新接口
 
 ```c
 /**
@@ -2115,7 +2728,7 @@ bool ui_update_preview_data(ui_context_t *ctx, const char *name,
 }
 ```
 
-### 十二、完整接入流程图（LVGL 版本）
+### 十五、完整接入流程图（LVGL 版本）
 
 ```
 ┌──────────┐    按键/触摸     ┌──────────┐
@@ -2164,9 +2777,9 @@ bool ui_update_preview_data(ui_context_t *ctx, const char *name,
                     └─────────────────────────┘
 ```
 
-### 十三、LVGL 特有注意事项
+### 十六、LVGL 特有注意事项
 
-#### 13.1 内存管理（ESP32 内存紧张）
+#### 16.1 内存管理（ESP32 内存紧张）
 
 ```c
 /* lv_conf.h 配置建议 */
@@ -2187,7 +2800,7 @@ bool ui_update_preview_data(ui_context_t *ctx, const char *name,
 - 3~5 个复杂页面（含图表、曲线）：约 200KB~300KB RAM
 - 超过 400KB 时要警惕内存不足
 
-#### 13.2 双核分工（ESP32 特有）
+#### 16.2 双核分工（ESP32 特有）
 
 ```
 Core 0（PRO_CPU）：
@@ -2203,7 +2816,7 @@ Core 1（APP_CPU）：
 
 **好处**：LVGL 渲染和网络通信互不干扰，减少卡顿。
 
-### 十四、常见操作速查表（LVGL 版本）
+### 十七、常见操作速查表（LVGL 版本）
 
 | 我想... | 怎么做 |
 |---------|--------|
@@ -2219,6 +2832,9 @@ Core 1（APP_CPU）：
 | 操作 LVGL 对象 | RTOS 环境必须加互斥锁保护 |
 | 管理页面生命周期 | 进入页面启动定时器，离开页面暂停定时器 |
 | 省内存 | 非活跃页面暂停定时器，大控件用完释放 |
+| 局部更新当前页面数据 | 调用 `ui_partial_update(ctx, item_id, data, data_len)` |
+| 跨页面更新数据 | 调用 `ui_cross_page_update(ctx, target_state, item_id, data, data_len)` |
+| 传感器数据更新到 UI | 当前页用 `ui_partial_update()`，其他页用 `ui_cross_page_update()` |
 
 ---
 
