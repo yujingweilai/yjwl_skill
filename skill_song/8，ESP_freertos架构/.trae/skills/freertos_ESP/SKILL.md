@@ -45,6 +45,7 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 - 搜索项目中是否包含 `xTaskCreate`、`xQueueCreate`、`TaskHandle_t` 等 FreeRTOS API
 - 搜索是否已有 `tasks/`、`middleware/`、`drivers/` 等架构目录
 - 搜索 `app_main.c` 中是否已有任务创建逻辑
+- **重点检测 LVGL 相关任务**：搜索 `esp_lvgl_port`、`lvgl_port`、`lv_task_handler`、`lvgl_port_lock`、`lvgl_port_unlock` 等关键字，判断项目中是否已有 LVGL 显示任务
 
 **如果发现已有架构**，必须暂停，向用户输出以下分析（用大白话），让用户选择：
 
@@ -95,6 +96,9 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
    - 是否已有 UI 框架？（LVGL、TFT_eSPI 等）
    - UI 框架是否提供外部调用接口？
    - UI 任务优先级需求
+   - ⭐ **项目中是否已有 LVGL 任务？**（如 `esp_lvgl_port`、`lvgl_port_task` 等）
+     - **如果已有 LVGL 任务** → 不新建 UI 任务，直接复用现有 LVGL 任务，在其中添加消息接收逻辑
+     - **如果没有 LVGL 任务** → 新建 1 个独立的 UI 任务（Task_LvglUI）
 
 2. **传感器列表**：
    - 需要集成哪些传感器？（DS1302、DHT11、BMP280、ADC 电池检测等）
@@ -142,6 +146,22 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 - 创建独立的 UI 任务，集成 LVGL 或其他框架
 - UI 任务负责初始化和刷新
 
+**场景 D：项目中已有 LVGL 任务（如 esp_lvgl_port）** ⭐ 重要
+- **绝对不要新建 Task_UI 或类似的 UI 任务**
+- 必须以项目中已有的 LVGL 任务为主（如 `esp_lvgl_port` 任务）
+- 其他任务通过消息队列或事件组将 UI 更新请求发送给 LVGL 任务
+- LVGL 任务负责接收消息并调用 LVGL API 更新界面
+- 示例：如果项目中有 `esp_lvgl_port` 任务，应该：
+  1. 保留 `esp_lvgl_port` 任务作为唯一的 UI 任务
+  2. 在 `esp_lvgl_port` 任务中添加消息接收逻辑
+  3. 其他任务通过消息队列发送 UI 更新请求给 `esp_lvgl_port`
+  4. `esp_lvgl_port` 任务接收消息后调用 `lv_label_set_text()` 等 LVGL API
+
+**判断是否有 LVGL 任务的方法**：
+- 搜索 `esp_lvgl_port`、`lvgl_port_task`、`lv_task_handler` 等关键字
+- 检查 `app_main.c` 或 `main.c` 中是否调用了 `esp_lvgl_port_init()` 或类似函数
+- 查看是否有专门的任务在调用 `lv_task_handler()`
+
 #### 2.2 任务数量动态决定策略
 
 **核心原则**：任务数量不是固定的，必须根据用户输入的功能需求动态判断。
@@ -155,7 +175,9 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 **任务数量判断流程**：
 1. **统计用户功能需求**：UI、传感器、执行器、通信
 2. **按以下规则合并**：
-   - UI 相关 → 1 个 UI 任务（如有 LVGL 等界面需求）
+   - **UI 相关**：
+     - ⭐ **如果项目中已有 LVGL 任务（如 esp_lvgl_port）→ 复用该任务，不新建 Task_UI**
+     - 如果没有 LVGL 任务 → 新建 1 个 UI 任务
    - 非阻塞传感器/外设 → 合并为 1 个系统外设任务
    - 每个阻塞型执行器 → 独立 1 个任务（打印机、电机等）
    - WiFi/MQTT/蓝牙 → 可独立 1 个通信任务，或合并到系统外设
@@ -189,6 +211,17 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 - 用户需求：DHT11 温湿度读取 + 串口输出
 - 任务划分：
   1. 主任务：DHT11 读取 + 串口输出（无需 UI，无需解耦）
+
+**场景 E：项目中已有 LVGL 任务（如 esp_lvgl_port）** ⭐ 重要
+- 用户需求：LVGL 界面（已有 esp_lvgl_port 任务）+ 按键 + DS1302 + 热敏打印机
+- 任务划分：
+  1. **复用 esp_lvgl_port 任务**：LVGL 界面刷新 + 消息接收（不新建 Task_UI）
+  2. 系统外设任务：按键 + DS1302
+  3. 打印任务：热敏打印机（阻塞型）
+- **关键点**：
+  - 在 esp_lvgl_port 任务中添加消息队列接收逻辑
+  - 其他任务通过 ui_msg_queue 发送 UI 更新请求给 esp_lvgl_port
+  - 不创建 task_ui.c 文件，不创建 Task_LvglUI 任务
 
 #### 2.3 解耦与合耦策略
 
@@ -337,6 +370,8 @@ esp_err_t app_arch_init(void)
 ```
 
 ##### UI 任务模板
+
+**情况 A：新建 UI 任务（项目中无 LVGL 任务时）**
 ```c
 void Task_LvglUI(void *arg)
 {
@@ -360,6 +395,59 @@ void Task_LvglUI(void *arg)
         lv_task_handler();
         vTaskDelay(pdMS_TO_TICKS(5));
     }
+}
+```
+
+**情况 B：复用现有 LVGL 任务（项目中有 esp_lvgl_port 时）** ⭐ 重要
+```c
+// ⚠️ 不要新建 Task_LvglUI！
+// ⚠️ 应该在现有的 esp_lvgl_port 任务中添加消息接收逻辑
+
+// 示例：在 esp_lvgl_port 任务的循环中添加消息处理
+void esp_lvgl_port_task(void *arg)
+{
+    ui_msg_t msg;
+    while(1)
+    {
+        // 1. 先处理消息队列（新增的逻辑）
+        if(xQueueReceive(ui_msg_queue, &msg, 0) == pdPASS)
+        {
+            switch(msg.type)
+            {
+                case UI_MSG_KEY_EVENT:
+                    // 调用 UI 框架接口更新界面
+                    lv_label_set_text(label_key, key_name[msg.data.key_id]);
+                    break;
+                case UI_MSG_RTC_TIME:
+                    // 更新时间显示
+                    update_clock_display(msg.data.rtc_time);
+                    break;
+                default:
+                    break;
+            }
+        }
+        
+        // 2. 原有的 LVGL 刷新逻辑（保持不变）
+        lv_task_handler();
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+// 在 app_main.c 中：
+// ❌ 不要这样做：xTaskCreate(Task_LvglUI, "Task_LvglUI", 12288, NULL, 5, NULL);
+// ✅ 应该这样做：直接使用已有的 esp_lvgl_port 任务，只创建其他任务
+esp_err_t app_arch_init(void)
+{
+    // 1. 创建消息队列
+    ui_msg_queue = xQueueCreate(8, sizeof(ui_msg_t));
+    
+    // 2. 只创建其他任务，不创建 UI 任务（因为已有 esp_lvgl_port）
+    xTaskCreate(Task_SystemPeriph, "Task_SystemPeriph", 4096, NULL, 3, NULL);
+    xTaskCreate(Task_Printer, "Task_Printer", 4096, NULL, 2, NULL);
+    
+    // 3. esp_lvgl_port 任务已经在其他地方创建，这里不需要再创建
+    
+    return ESP_OK;
 }
 ```
 
@@ -423,9 +511,11 @@ project/
 │
 ├── tasks/                          # FreeRTOS 任务
 │   ├── CMakeLists.txt
-│   ├── task_ui.c                   # UI 任务
+│   ├── task_ui.c                   # UI 任务（仅当项目中无 LVGL 任务时创建）
 │   ├── task_system_periph.c        # 系统外设任务
 │   └── task_printer.c              # 打印任务（如有）
+│   # ⭐ 注意：如果项目中已有 esp_lvgl_port 等 LVGL 任务，则不创建 task_ui.c，
+│   #          而是复用现有的 LVGL 任务，在其中添加消息接收逻辑
 │
 ├── middleware/                     # 中间件（可选，仅当需要解耦时）
 │   ├── CMakeLists.txt
@@ -464,9 +554,21 @@ idf_component_register(
 ```
 
 **tasks/CMakeLists.txt 示例**：
+
+**情况 A：新建 UI 任务（项目中无 LVGL 任务时）**
 ```cmake
 idf_component_register(
     SRCS "task_ui.c" "task_system_periph.c" "task_printer.c"
+    INCLUDE_DIRS "."
+    REQUIRES middleware drivers lvgl ds1302
+)
+```
+
+**情况 B：复用现有 LVGL 任务（项目中有 esp_lvgl_port 时）** ⭐ 重要
+```cmake
+# ⚠️ 不包含 task_ui.c，因为使用已有的 esp_lvgl_port 任务
+idf_component_register(
+    SRCS "task_system_periph.c" "task_printer.c"
     INCLUDE_DIRS "."
     REQUIRES middleware drivers lvgl ds1302
 )
@@ -486,6 +588,9 @@ idf_component_register(
 
 ##### 4.1.1 整体架构说明
 - 任务划分逻辑：为什么这样分任务，每个任务负责什么
+- **LVGL 任务说明**（重要）：
+  - 如果项目中已有 LVGL 任务（如 esp_lvgl_port）→ 说明复用了该任务，不新建 Task_UI
+  - 如果没有 LVGL 任务 → 说明新建了 Task_UI
 - 消息流向图：用箭头画出消息从哪个任务到哪个任务
 - 优先级分配原因：为什么 UI 任务优先级最高，为什么打印任务最低
 
