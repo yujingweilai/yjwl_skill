@@ -192,6 +192,16 @@ description: "专为 ESP 系列芯片（ESP32/ESP32-S2/S3/C3/C6/H2 等）生成 
 
 **核心原则**：任务数量不是固定的，必须根据用户输入的功能需求动态判断。
 
+**⭐⭐ 强制规则：每个任务必须独立成组件**
+- **每个新建的任务都必须创建一个独立的 ESP-IDF 组件**
+- **组件名 = 任务名**（如：Task_UI → task_ui 组件，Task_SystemPeriph → task_system_periph 组件）
+- **每个任务组件必须有独立的 CMakeLists.txt**，配置 ESP32 相关依赖
+- **任务组件放在 components/ 目录下**，与其他第三方组件同级
+- **示例**：
+  - 创建 Task_UI 任务 → 必须创建 `components/task_ui/` 组件
+  - 创建 Task_SystemPeriph 任务 → 必须创建 `components/task_system_periph/` 组件
+  - 创建 Task_Printer 任务 → 必须创建 `components/task_printer/` 组件
+
 **任务合并原则**：
 - 相同优先级、相同 IO 访问模式的功能合并
 - 定时采集类传感器合并到一个任务（如 RTC+ADC+温湿度）
@@ -662,29 +672,36 @@ project/
 │   ├── app_main.c                  # 程序入口
 │   └── app_config.h                # 全局配置（引脚定义、任务参数）
 │
-├── components/                     # 第三方组件（ESP-IDF 组件管理）
+├── components/                     # 所有组件（ESP-IDF 组件管理）
 │   ├── lvgl/                       # LVGL 库（如使用）
 │   ├── ds1302/                     # DS1302 驱动组件
 │   │   ├── CMakeLists.txt
 │   │   ├── ds1302.h
 │   │   └── ds1302.c
-│   └── dht11/                      # DHT11 驱动组件
+│   ├── dht11/                      # DHT11 驱动组件
+│   │   ├── CMakeLists.txt
+│   │   ├── dht11.h
+│   │   └── dht11.c
+│   │
+│   ├── task_ui/                    # ⭐ UI 任务组件（组件名 = 任务名）
+│   │   ├── CMakeLists.txt          # 任务组件的 CMake 配置
+│   │   ├── task_ui.h               # 任务接口定义
+│   │   └── task_ui.c               # 任务实现（仅当项目中无 LVGL 任务时创建）
+│   │
+│   ├── task_system_periph/         # ⭐ 系统外设任务组件（组件名 = 任务名）
+│   │   ├── CMakeLists.txt          # 任务组件的 CMake 配置
+│   │   ├── task_system_periph.h    # 任务接口定义
+│   │   └── task_system_periph.c    # 任务实现
+│   │
+│   ├── task_printer/               # ⭐ 打印任务组件（组件名 = 任务名）
+│   │   ├── CMakeLists.txt          # 任务组件的 CMake 配置
+│   │   ├── task_printer.h          # 任务接口定义
+│   │   └── task_printer.c          # 任务实现（如有）
+│   │
+│   └── app_arch/                   # 应用架构层（线程安全 UI 更新封装）
 │       ├── CMakeLists.txt
-│       ├── dht11.h
-│       └── dht11.c
-│
-├── app_arch/                       # 应用架构层（线程安全 UI 更新封装）⭐ 新增
-│   ├── CMakeLists.txt
-│   ├── app_arch_ui.h               # UI 更新接口定义（外部任务调用）
-│   └── app_arch_ui.c               # UI 更新接口实现（内部封装消息队列）
-│
-├── tasks/                          # FreeRTOS 任务
-│   ├── CMakeLists.txt
-│   ├── task_ui.c                   # UI 任务（仅当项目中无 LVGL 任务时创建）
-│   ├── task_system_periph.c        # 系统外设任务
-│   └── task_printer.c              # 打印任务（如有）
-│   # ⭐ 注意：如果项目中已有 esp_lvgl_port 等 LVGL 任务，则不创建 task_ui.c，
-│   #          而是复用现有的 LVGL 任务，在其中添加消息接收逻辑
+│       ├── app_arch_ui.h           # UI 更新接口定义（外部任务调用）
+│       └── app_arch_ui.c           # UI 更新接口实现（内部封装消息队列）
 │
 ├── middleware/                     # 中间件（可选，仅当需要解耦时）
 │   ├── CMakeLists.txt
@@ -700,6 +717,18 @@ project/
     └── ARCH_GUIDE.md               # 架构使用指南（第四步生成）
 ```
 
+**⭐⭐ 强制规则说明**：
+- **每个任务都是独立的组件**，放在 `components/` 目录下
+- **组件名 = 任务名**（小写，下划线分隔）
+- **每个任务组件必须包含**：
+  - `CMakeLists.txt`：配置 ESP32 相关依赖
+  - `task_xxx.h`：任务接口定义（可选，但推荐）
+  - `task_xxx.c`：任务实现代码
+- **示例**：
+  - Task_UI → `components/task_ui/`
+  - Task_SystemPeriph → `components/task_system_periph/`
+  - Task_Printer → `components/task_printer/`
+
 #### 3.2 CMake 配置生成
 
 为每个目录生成 `CMakeLists.txt`：
@@ -709,7 +738,7 @@ project/
 idf_component_register(
     SRCS "app_main.c"
     INCLUDE_DIRS "."
-    REQUIRES tasks app_arch middleware drivers lvgl ds1302
+    REQUIRES task_ui task_system_periph task_printer app_arch middleware drivers lvgl ds1302
 )
 ```
 
@@ -722,7 +751,7 @@ idf_component_register(
 )
 ```
 
-**app_arch/CMakeLists.txt 示例**：⭐ 新增
+**app_arch/CMakeLists.txt 示例**：
 ```cmake
 idf_component_register(
     SRCS "app_arch_ui.c"
@@ -731,26 +760,41 @@ idf_component_register(
 )
 ```
 
-**tasks/CMakeLists.txt 示例**：
+**⭐⭐ 每个任务组件的 CMakeLists.txt 示例**（强制要求）：
 
-**情况 A：新建 UI 任务（项目中无 LVGL 任务时）**
+**components/task_ui/CMakeLists.txt**：
 ```cmake
 idf_component_register(
-    SRCS "task_ui.c" "task_system_periph.c" "task_printer.c"
+    SRCS "task_ui.c"
     INCLUDE_DIRS "."
-    REQUIRES app_arch middleware drivers lvgl ds1302
+    REQUIRES app_arch middleware lvgl freertos
 )
 ```
 
-**情况 B：复用现有 LVGL 任务（项目中有 esp_lvgl_port 时）** ⭐ 重要
+**components/task_system_periph/CMakeLists.txt**：
 ```cmake
-# ⚠️ 不包含 task_ui.c，因为使用已有的 esp_lvgl_port 任务
 idf_component_register(
-    SRCS "task_system_periph.c" "task_printer.c"
+    SRCS "task_system_periph.c"
     INCLUDE_DIRS "."
-    REQUIRES app_arch middleware drivers lvgl ds1302
+    REQUIRES app_arch middleware drivers ds1302 freertos
 )
 ```
+
+**components/task_printer/CMakeLists.txt**：
+```cmake
+idf_component_register(
+    SRCS "task_printer.c"
+    INCLUDE_DIRS "."
+    REQUIRES app_arch middleware freertos
+)
+```
+
+**⭐⭐ 任务组件 CMake 配置规则**：
+- **每个任务组件必须有独立的 CMakeLists.txt**
+- **REQUIRES 中必须包含该任务依赖的所有组件**
+- **必须包含 `freertos` 依赖**（因为使用了 FreeRTOS API）
+- **如果任务需要更新 UI，必须依赖 `app_arch` 组件**
+- **如果任务需要访问硬件，必须依赖相应的 `drivers` 或传感器组件**
 
 **文件创建完成后，进入第四步。**
 
@@ -1485,7 +1529,7 @@ lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN) → 显示
 
 ##### 4.1.7 修改指南
 - 如何添加新传感器：在 drivers/ 下新建文件 → 在 task_system_periph.c 中 #include 并调用 → 在 `app_arch_ui.h` 的 `ui_update_type_t` 枚举中添加新类型 → 在 `app_arch_ui.c` 的 switch-case 中添加数据拷贝逻辑 → 在 UI 任务的 switch-case 中添加显示处理
-- 如何添加新任务：在 tasks/ 下新建 task_xxx.c → 在 CMakeLists.txt 中添加源文件 → 在 app_arch_init() 中 xTaskCreate
+- 如何添加新任务：⭐⭐ **必须创建独立组件** → 在 `components/` 下新建 `task_xxx/` 目录 → 创建 `task_xxx.c`、`task_xxx.h`、`CMakeLists.txt` → 在 `CMakeLists.txt` 中配置 ESP32 依赖（必须包含 `freertos`） → 在 `main/CMakeLists.txt` 的 REQUIRES 中添加 `task_xxx` → 在 `app_arch_init()` 中 xTaskCreate
 - 如何调整任务优先级：修改 app_arch_init() 中 xTaskCreate 的第 5 个参数
 - 如何新增 UI 更新类型：在 `app_arch/app_arch_ui.h` 的 `ui_update_type_t` 枚举中添加新类型 → 在 `app_arch_ui.c` 的 `app_arch_ui_update()` 函数中添加对应的数据拷贝逻辑 → 在 UI 任务的 `xQueueReceive` 后的 switch-case 中添加对应的 UI 更新处理
 - 如何使用 app_arch 层更新 UI：在外部任务中 `#include "app_arch_ui.h"` → 调用 `app_arch_ui_update(UI_UPDATE_XXX, &data)` → 无需直接操作消息队列
