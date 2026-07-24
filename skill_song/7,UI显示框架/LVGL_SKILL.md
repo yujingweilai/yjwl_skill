@@ -74,7 +74,7 @@ description: "Designs C UI state-machine frameworks for LVGL displays. Invoke wh
 
 **必须等用户回答后再开始写代码。**
 
-### 第 4 问：外部传感器数据类型有哪些？（强制询问）
+### 第 5 问：外部传感器数据类型有哪些？（强制询问）
 
 向用户确认：
 
