@@ -1,5 +1,5 @@
 ---
-name: "lvgl-helper"
+name: "lvgl-约束及其参考"
 description: "LVGL UI开发辅助工具，提供代码规范、公共接口参考和文档查询。Invoke when writing LVGL UI code, creating pages, or when unsure about LVGL API usage."
 ---
 
@@ -99,52 +99,69 @@ static void btn_event_handler(lv_event_t *e)
 模板文件位于本 skill 目录下的 `templates/` 文件夹：
 
 ```
-.trae/skills/lvgl-helper/templates/
-├── ui_common_interface.md      # UI 公共接口模板
-├── button_event_template.md    # 按钮事件模板
-├── image_render_template.md    # 图片渲染模板
-├── font_usage_template.md      # 字体使用模板
-├── state_machine_template.md   # 状态机模板
-├── page_navigation_template.md # 页面导航模板
-└── custom_module_template.md   # 自定义模块模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_arch\app_arch.c     # 程序架构模板，外部传输数据给UI的入口点
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_arch\include\app_arch_config.h   # 程序架构配置模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\ui_common\imge_common.c     # 图片显示及其一些形状框 公共模块模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\ui_common\font_common.c     # 字体使用公共模块模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\ui_common\ui_common.c       # UI公共模块模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_ui\include\app_ui.h      # 应用UI公共接口模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_ui\app_ui.c              # 应用UI公共接口模板
+├── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_arch\include\app_arch.h   # 应用架构公共接口模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font\roboto_bold_18.c     # Roboto 字体加粗18号公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font\roboto_bold_16.c     # Roboto 字体加粗16号公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font\roboto_regular_16.c  # Roboto 字体普通16号公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font\roboto_regular_14.c  # Roboto 字体普通14号公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font\roboto_bold_14.c     # Roboto 字体加粗14号公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font\roboto_italic_13.c  # Roboto 字体斜体13号公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\roboto_font                       # Roboto 字体公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\ui_imge                              # 图片显示
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_ui\UI_FRAMEWORK_GUIDE.md        # UI框架指南模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\docs\ARCH_GUIDE.md                            # 应用架构指南模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_ui\ui_even_common.c            # 按钮事件公共接口公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\ui_common\include\color_common.h          # 颜色定义模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\ui_common\label_common.c             # 带边框的文本标签公共模块模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_ui\include\app_ui_test.h          # 应用UI测试公共接口模板
+└── D:\code\LBOL\code\new_git\lbol_esp32\LBOL\components\app_ui\app_ui_test.c              # 应用UI测试公共接口模板
+
+
+
+### 4.2 项目固定外部数据传输链路（强制）
+
+本项目已经具备 `app_arch → app_ui → page_ui` 的数据传递框架。后续凡是传感器、RTC、电池、通信或其他业务任务向 UI 更新数据，**必须优先复用以下链路，不允许新建平行 UI 更新通道**：
+
+```text
+业务任务（例如温湿度传感器）
+    ↓ 只调用 app_arch.h 的公共接口
+app_arch_patch_ui_page_data() / app_arch_switch_ui_page_with_data()
+    ↓ app_arch.c 获取 s_ui_api_mutex，串行保护 UI 上下文访问
+app_ui_patch_page_data() / app_ui_switch_page_with_data()
+    ↓ 更新 app_ui_context_t.page_data，设置 need_refresh
+app_ui_update_display() → app_ui_render_current_page()
+    ↓ 获取 lvgl_port_lock() 后调用当前页面 draw()
+page_ui 绘制函数
+    ↓ 只从 const app_ui_context_t *ctx 读取页面数据并更新 LVGL 控件
+LVGL / 显示驱动
 ```
+
+#### 强制调用规则
+
+1. **业务任务只包含并调用 `app_arch.h`，不得直接调用 `app_ui.h` 的数据更新、切页、刷新接口。** `app_ui.h` 是 UI 内部框架接口；`app_arch.h` 才是业务层线程安全入口。
+2. **禁止业务任务直接调用页面 `draw()` 函数、`lv_label_set_text()`、`lv_obj_create()` 或其他 LVGL API。** LVGL 控件只能由 `app_ui` 的统一渲染路径在 `lvgl_port_lock()` 保护下操作。
+3. 同页面数据更新优先调用 `app_arch_patch_ui_page_data(APP_ARCH_UI_SRC_USER_API, &patch)`；只有需要切换目标页面并携带基础数据时，才调用 `app_arch_switch_ui_page_with_data()`。
+4. 外部数据更新默认**不应强制切页**。如果温湿度页面当前未显示，只更新缓存数据；用户进入该页后，由页面 `draw()` 显示最新值。仅在明确业务要求“收到数据必须跳转页面”时才切页。
+5. `app_ui_page_data_t.user_data` 当前只保存指针、不复制通用业务结构体。传入的数据必须是静态变量、全局变量或其他生命周期足够长的存储，**禁止传递任务局部变量、函数栈变量或即将释放的动态内存地址**。
+6. `app_ui_update_label_preview()` 是已存在的特殊安全接口：它会复制标签预览数据到 UI 内部缓存。其他通用 `user_data` 场景不能假设有此复制行为。
+7. **禁止在 ISR/中断回调中调用任何 `app_arch_*ui*` 接口。** ISR 只能使用 `xQueueSendFromISR()` 或任务通知把数据交给普通业务任务，再由该任务调用 `app_arch` 接口。
+8. 高频传感器采样不能每次都立即刷新 UI。应按有效数据变化或 200~500 ms 等业务周期合并刷新，避免频繁重绘和占用 LVGL 锁。
+
+#### 温湿度传输约定
+
+温度、湿度属于关联数据，优先使用一个长期有效的业务结构体经 `user_data` 传递；整数建议用放大 10 倍的定点值，例如 `253` 代表 `25.3℃`，`615` 代表 `61.5%RH`。页面 `draw()` 从 `ctx->page_data.user_data` 读取该结构体并显示，不能由传感器任务直接修改 label。
+
+大白话：`app_arch` 不是多余中转，它负责把多个业务任务的 UI 请求排队串行化；`app_ui` 负责保存页面数据和统一拿 LVGL 锁画界面。数据不是被重复复制两次，而是按职责逐层交给对应模块处理。
 
 **注意：** 开发者需要根据实际项目自行创建和维护这些模板文件，AI 在编写代码时会引用这些模板。
 
-#### 4.2 模板内容示例
-
-**开发者应该在模板文件中提供：**
-
-1. **UI 公共接口模板** (`ui_common_interface.md`)
-   - 页面创建函数签名
-   - 页面销毁函数签名
-   - 页面刷新函数签名
-   - 数据传递接口
-
-2. **按钮事件模板** (`button_event_template.md`)
-   - 按钮创建标准代码
-   - 事件回调函数模板
-   - 样式应用方式
-
-3. **图片渲染模板** (`image_render_template.md`)
-   - 图片资源引用方式
-   - 图片控件创建方法
-   - 图片更新接口
-
-4. **字体使用模板** (`font_usage_template.md`)
-   - 字体声明方式
-   - 字体应用方法
-   - 多语言字体处理
-
-5. **状态机模板** (`state_machine_template.md`)
-   - 页面状态定义
-   - 状态切换逻辑
-   - 状态处理函数
-
-6. **自定义模块模板** (`custom_module_template.md`)
-   - 项目特有的公共模块
-   - 自定义控件封装
-   - 业务逻辑接口
 
 #### 4.3 AI 参考规则
 
