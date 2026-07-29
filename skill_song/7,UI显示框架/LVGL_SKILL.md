@@ -1,5 +1,5 @@
 ---
-name: "ui-state-machine-framework-lvgl"
+name: "lvgl_UI框架"
 description: "Designs C UI state-machine frameworks for LVGL displays. Invoke when building, refactoring, or reviewing embedded LVGL UI state routing."
 ---
 
@@ -19,6 +19,41 @@ description: "Designs C UI state-machine frameworks for LVGL displays. Invoke wh
 - ESP32 + LVGL 工程实践（线程安全、内存管理、双核分工）
 
 **注意**：本 skill 仅适用于 LVGL 架构。如果用户使用非 LVGL 的裸机 TFT/LCD/OLED，请使用 `ui-state-machine-framework-non-lvgl` skill。
+
+## 本项目外部数据进入 UI 的固定链路（最高优先级）
+
+当目标工程包含 `app_arch.h`、`app_arch.c`、`app_ui.h`、`app_ui.c` 时，下面项目实际链路优先级高于本 Skill 中所有通用示例，**不得套用“业务任务直接写 ui_context_t”“业务任务直接调用局部 LVGL 更新函数”或“传感器数据更新必然切页”的通用写法**。
+
+```text
+传感器 / RTC / 通信等业务任务
+    ↓ 仅调用 app_arch.h
+app_arch_patch_ui_page_data() 或 app_arch_switch_ui_page_with_data()
+    ↓ s_ui_api_mutex：串行保护业务侧 UI 请求
+app_ui_patch_page_data() 或 app_ui_switch_page_with_data()
+    ↓ 更新 app_ui_context_t.page_data 和 need_refresh
+app_ui_update_display() → app_ui_render_current_page()
+    ↓ lvgl_port_lock()：保护所有 LVGL 对象操作
+当前页面 draw(display, ctx)
+    ↓ 只读取 ctx 中的数据并更新控件
+LVGL / 显示驱动
+```
+
+### 项目强制规则
+
+1. 传感器等业务模块只能包含 `app_arch.h` 并调用 `app_arch_*` 接口；禁止直接调用 `app_ui_*` 数据更新、切页或刷新接口。
+2. 禁止业务任务、定时器回调或 ISR 直接操作任何 `lv_obj_t`、调用 `lv_label_set_text()`、页面 `draw()` 函数或其他 LVGL API。
+3. 同页数据更新使用 `app_arch_patch_ui_page_data(APP_ARCH_UI_SRC_USER_API, &patch)`；需要明确切页时才使用 `app_arch_switch_ui_page_with_data()`。
+4. 数据更新默认只更新缓存和当前显示页；目标页未显示时不允许为了刷新传感器数值而擅自切页。
+5. 通用 `app_ui_page_data_t.user_data` 仅保存指针。业务数据必须是静态、全局或由长期数据模块持有的内存；严禁传递局部栈变量地址、临时缓冲区地址和即将释放的内存。
+6. ISR 只能用 `xQueueSendFromISR()` 或任务通知把消息转交给普通任务；普通任务再调用 `app_arch`，不能在 ISR 中等待 UI 互斥锁。
+7. 采样频率高于 UI 必要刷新频率时，应按数据变化或 200~500 ms 周期合并刷新，不能每次采样都要求立刻重绘。
+8. 页面绘制函数只从 `const app_ui_context_t *ctx` 读取业务数据；LVGL 操作只能由 `app_ui_render_current_page()` 持有 `lvgl_port_lock()` 时触发。
+
+### 温湿度数据约定
+
+温度和湿度应作为同一个业务结构体关联传递，建议使用定点整数（例如 `temperature_x10=253` 表示 `25.3℃`）。页面从 `ctx->page_data.user_data` 读取并显示。该结构体不是由 `app_ui` 通用接口复制的，所以它必须保持有效生命周期。
+
+大白话：`app_arch` 管“哪个任务想更新 UI、谁先谁后”；`app_ui` 管“保存什么页面数据、什么时候画、如何锁住 LVGL”；页面只管“拿数据画出来”。这不是两次 UI 中转，而是防止业务任务直接碰 LVGL 后出现并发崩溃的必要分层。
 
 ## 构建前询问流程（强制要求）
 
@@ -74,7 +109,33 @@ description: "Designs C UI state-machine frameworks for LVGL displays. Invoke wh
 
 **必须等用户回答后再开始写代码。**
 
-### 第 5 问：外部传感器数据类型有哪些？（强制询问）
+### 第 4 问：业务和页面逻辑是否需要分层？（推荐）
+
+向用户确认：
+
+> "你是想把 SET4 / UP1 / DOWN2 / RGB3 这类按键业务统一放到中间层处理，再让页面只管显示和局部交互，还是每个页面自己分别写一套？"
+
+**推荐方案：中间层分离**
+
+- 按键统一在中间层处理，不直接散落到每个页面
+- 页面只负责自己的渲染和局部高亮
+- 公共业务逻辑只写一份，后续改动最稳
+- 新页面接入时只需要接入中间层，不用复制按键判断代码
+
+**不推荐方案：每页各写一套**
+
+- 每个页面都写 `SET4 / UP1 / DOWN2 / RGB3`
+- 页面代码会越来越重复
+- 后面改按键规则时要改很多地方
+
+**大白话结论：**
+
+- 如果你想要“业务和逻辑分开”，就优先走中间层分离
+- 这样最适合后面继续扩页面，也最方便维护
+
+**必须等用户回答后再开始写代码。**
+
+### 第 4 问：外部传感器数据类型有哪些？（强制询问）
 
 向用户确认：
 
@@ -566,9 +627,9 @@ bool ui_update_display(ui_context_t *ctx)
 
 ---
 
-## 数据更新接口（强制要求）
+## 通用数据更新接口（仅限未使用 app_arch/app_ui 的工程）
 
-**以下两个接口函数是强制性要求，所有 LVGL UI 框架必须实现。**
+**以下内容是通用独立 UI 框架示例。目标工程已经存在 `app_arch → app_ui → page_ui` 时，不得新增或调用这些平行接口；必须遵守本文件开头“本项目外部数据进入 UI 的固定链路”。**
 
 ### 局部数据更新接口（同页面数据刷新）
 
@@ -2115,9 +2176,9 @@ void Task_LvglUI(void *arg)
 }
 ```
 
-### 八、数据如何传递（LVGL 版本）
+### 八、数据如何传递（通用独立框架示例）
 
-**大白话：所有数据都放在 `ui_context_t` 里，页面从 ctx 里读数据来画。**
+**本项目例外：存在 `app_arch/app_ui` 时，业务任务不得直接写 `ui_context_t`。必须调用 `app_arch_patch_ui_page_data()`，由 `app_arch → app_ui → 页面 draw()` 传递数据。以下内容仅适用于没有该项目框架的独立示例。**
 
 #### 8.1 定义页面数据
 
@@ -2498,7 +2559,9 @@ ui_partial_update(&ui_ctx, PREVIEW_ITEM_TEMPERATURE, &new_temp, 0);
 
 > 大白话：`ui_cross_page_update()` 就是把"切页 + 局部更新"两步合成了一步，写起来更方便。
 
-#### 12.4 外部传感器数据如何跨页面更新（LVGL 版本）
+#### 12.4 外部传感器数据如何跨页面更新（通用独立框架示例）
+
+**项目固定链路例外：** 本项目传感器数据不允许为了更新数值而调用通用跨页面接口强制切页。未显示的目标页面只保存最新缓存；用户进入页面时由 `draw(display, ctx)` 显示。只有用户明确提出“数据到达后自动跳转页面”时，才能通过 `app_arch_switch_ui_page_with_data()` 切页。 
 
 ```c
 /* 传感器任务：每 1 秒读一次温度 */
